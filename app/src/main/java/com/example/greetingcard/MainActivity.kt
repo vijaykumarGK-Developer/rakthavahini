@@ -2,6 +2,7 @@ package com.example.greetingcard
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,6 +16,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,8 +34,17 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.Exclude
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
+import com.google.firebase.firestore.QuerySnapshot
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -50,50 +61,195 @@ fun formatFullDate(timestamp: Long): String {
     return formatter.format(Date(timestamp))
 }
 
+@IgnoreExtraProperties
 data class Donor(
-    val id: Int, var name: String, var age: String, var gender: String, var group: String,
-    var phone: String, var altPhone: String, var address: String, var distance: Double,
-    var lat: Double, var lng: Double, var lastDonationMs: Long,
-    var responseSpeed: Int, var freq: Int, var activeDaysAgo: Int,
-    var calcDist: Double = 0.0, var smartScore: Double = 0.0, var isEligible: Boolean = false
+    val uid: String = "", 
+    var name: String = "", 
+    var email: String = "",
+    var age: String = "", 
+    var gender: String = "", 
+    var group: String = "",
+    var phone: String = "", 
+    var altPhone: String = "", 
+    var address: String = "", 
+    var lat: Double = 0.0, 
+    var lng: Double = 0.0, 
+    var lastDonationMs: Long = 0,
+    var responseSpeed: Int = 0, 
+    var freq: Int = 0, 
+    var activeDaysAgo: Int = 0,
+    
+    // Transient/Calculated fields for UI (Excluded from Firestore)
+    @get:Exclude var distance: Double = 0.0,
+    @get:Exclude var calcDist: Double = 0.0, 
+    @get:Exclude var smartScore: Double = 0.0, 
+    @get:Exclude var isEligible: Boolean = false
 )
 
+@IgnoreExtraProperties
 data class Hospital(
-    val id: Int, var name: String, var address: String, var lat: Double, var lng: Double,
-    var email: String, var phone: String, var landline: String
+    val id: String = "", 
+    var name: String = "", 
+    var address: String = "", 
+    var lat: Double = 0.0, 
+    var lng: Double = 0.0,
+    var email: String = "", 
+    var phone: String = "", 
+    var landline: String = ""
+)
+
+@IgnoreExtraProperties
+data class DonationLog(
+    val id: String = "",
+    val userId: String = "",
+    val userName: String = "",
+    val timestamp: Long = 0,
+    val bloodGroup: String = "",
+    val hospitalName: String = ""
+)
+
+@IgnoreExtraProperties
+data class EmergencyRequest(
+    val id: String = "",
+    val requesterId: String = "",
+    val bloodGroup: String = "",
+    val units: String = "1",
+    val lat: Double = 0.0,
+    val lng: Double = 0.0,
+    val status: String = "ACTIVE",
+    val timestamp: Long = 0
 )
 
 val bloodGroups = listOf("O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-")
 
-class AppState {
+class AppState(val isPreview: Boolean = false) {
+    private val auth by lazy { if (isPreview) null else FirebaseAuth.getInstance() }
+    private val db by lazy { if (isPreview) null else FirebaseFirestore.getInstance() }
+
     var isDarkTheme by mutableStateOf(false)
     var hasOnboarded by mutableStateOf(false)
+    var isAuthenticated by mutableStateOf(true) // Always authenticated for this version
+    var isAuthenticating by mutableStateOf(false)
     var currentTab by mutableStateOf("search")
 
     // Slide Overlays
     var showUserDetail by mutableStateOf<Donor?>(null)
     var showHospitalDetail by mutableStateOf<Hospital?>(null)
     var showSettings by mutableStateOf(false)
+    var showProfileEdit by mutableStateOf(false)
     var showStaticPage by mutableStateOf<String?>(null)
     var showCertificate by mutableStateOf(false)
     var showEmergencySheet by mutableStateOf(false)
 
     // Data Setup
     val nowMs = System.currentTimeMillis()
-    val myHistory = mutableStateListOf(nowMs - (100 * DAY_IN_MS))
+    var currentUser by mutableStateOf(Donor(auth?.currentUser?.uid ?: "tester_777", auth?.currentUser?.displayName ?: "Tester User", auth?.currentUser?.email ?: "tester@example.com", "25", "Male", "O+", "9998887776", "N/A", "Bangalore, India", 12.9716, 77.5946, nowMs - (120 * DAY_IN_MS), 10, 5, 2))
+    val globalLogs = mutableStateListOf<DonationLog>()
     var myLiveLocation by mutableStateOf<Pair<Double, Double>?>(null)
 
-    val enrolledUsers = mutableStateListOf(
-        Donor(1, "Rahul Sharma", "28", "Male", "O+", "9876543210", "9876543201", "Sector 4", 5.0, 28.6139, 77.2090, nowMs - (100 * DAY_IN_MS), 5, 8, 1),
-        Donor(2, "Priya Singh", "24", "Female", "A+", "9876543211", "9876543202", "Green Valley", 12.0, 28.5677, 77.2201, nowMs - (40 * DAY_IN_MS), 15, 3, 5),
-        Donor(3, "Amit Kumar", "35", "Male", "O+", "9876543212", "N/A", "Highway Rd", 18.0, 28.6883, 77.2069, nowMs - (150 * DAY_IN_MS), 2, 12, 0),
-        Donor(4, "Neha Gupta", "29", "Female", "O+", "9876543213", "N/A", "West End", 3.0, 28.6200, 77.2100, nowMs - (110 * DAY_IN_MS), 30, 1, 10)
-    )
+    val enrolledUsers = mutableStateListOf<Donor>()
+    val enrolledHospitals = mutableStateListOf<Hospital>()
+    val activeEmergencies = mutableStateListOf<EmergencyRequest>()
 
-    val enrolledHospitals = mutableStateListOf(
-        Hospital(1, "City Care Hospital", "123 Main St, Medical District", 12.9716, 77.5946, "emergency@citycare.com", "9988776655", "011-2345678"),
-        Hospital(2, "Apollo Lifeline", "45 West Avenue, Suburbia", 13.0827, 80.2707, "bloodbank@apollo.com", "9988776644", "011-8765432")
-    )
+    fun loadInitialData() {
+        if (isPreview) {
+            enrolledUsers.addAll(listOf(
+                Donor("1", "Rahul Sharma", "rahul@example.com", "28", "Male", "O+", "9876543210", "9876543201", "Sector 4", 28.6, 77.2, nowMs - (100 * DAY_IN_MS), 5, 8, 1),
+                Donor("2", "Anjali Gupta", "anjali@example.com", "24", "Female", "A-", "9988776655", "N/A", "Whitefield", 12.9698, 77.7500, nowMs - (150 * DAY_IN_MS), 9, 3, 5)
+            ))
+            enrolledHospitals.addAll(listOf(
+                Hospital("1", "City General Hospital", "MG Road, Bangalore", 12.9716, 77.5946, "contact@cityhosp.com", "080-12345678", "080-87654321"),
+                Hospital("2", "Life Care Blood Bank", "Indiranagar, Bangalore", 12.9784, 77.6408, "info@lifecare.org", "9845012345", "080-22334455")
+            ))
+            return
+        }
+        
+        // Listen to Users
+        db?.collection("users")?.addSnapshotListener { snapshot, _ ->
+            snapshot?.let {
+                enrolledUsers.clear()
+                enrolledUsers.addAll(it.toObjects(Donor::class.java))
+            }
+        }
+        // Listen to Hospitals
+        db?.collection("hospitals")?.addSnapshotListener { snapshot, _ ->
+            snapshot?.let {
+                enrolledHospitals.clear()
+                enrolledHospitals.addAll(it.toObjects(Hospital::class.java))
+            }
+        }
+        // Listen to Logs
+        db?.collection("donation_logs")?.orderBy("timestamp")?.addSnapshotListener { snapshot, _ ->
+            snapshot?.let {
+                globalLogs.clear()
+                globalLogs.addAll(it.toObjects(DonationLog::class.java))
+            }
+        }
+        // Listen to Emergencies
+        db?.collection("emergencies")?.whereEqualTo("status", "ACTIVE")?.addSnapshotListener { snapshot, _ ->
+            snapshot?.let {
+                activeEmergencies.clear()
+                activeEmergencies.addAll(it.toObjects(EmergencyRequest::class.java))
+            }
+        }
+        
+        // Load current user profile (using Firebase UID or stable tester ID)
+        val uid = auth?.currentUser?.uid ?: "tester_777"
+        db?.collection("users")?.document(uid)?.get()?.addOnSuccessListener { doc ->
+            if (doc.exists()) {
+                doc.toObject(Donor::class.java)?.let { currentUser = it }
+            } else {
+                val newUser = currentUser.copy(uid = uid)
+                db?.collection("users")?.document(uid)?.set(newUser)
+            }
+        }
+    }
+
+    fun signOut() {
+        if (isPreview) { isAuthenticated = false; return }
+        auth?.signOut()
+        isAuthenticated = false
+        // For this version, we'll just allow immediate re-entry if they click logout
+    }
+
+    fun updateUserProfile(donor: Donor) {
+        currentUser = donor
+        if (isPreview) return
+        val uid = auth?.currentUser?.uid ?: "tester_777"
+        db?.collection("users")?.document(uid)?.set(donor)
+    }
+
+    fun registerDonor(donor: Donor) {
+        if (isPreview) return
+        db?.collection("users")?.document(donor.uid)?.set(donor)
+    }
+
+    fun registerHospital(hospital: Hospital) {
+        if (isPreview) return
+        val id = db?.collection("hospitals")?.document()?.id ?: return
+        db?.collection("hospitals")?.document(id)?.set(hospital.copy(id = id))
+    }
+
+    fun logDonation(hospitalName: String = "General Hospital") {
+        if (isPreview) return
+        val uid = auth?.currentUser?.uid ?: "tester_777"
+        val logId = db?.collection("donation_logs")?.document()?.id ?: return
+        val log = DonationLog(logId, uid, currentUser.name, System.currentTimeMillis(), currentUser.group, hospitalName)
+        
+        db?.collection("donation_logs")?.document(logId)?.set(log)
+        
+        // Update user's last donation date
+        val updatedUser = currentUser.copy(lastDonationMs = log.timestamp, freq = currentUser.freq + 1)
+        updateUserProfile(updatedUser)
+    }
+
+    fun broadcastEmergency(group: String, units: String) {
+        if (isPreview) return
+        val uid = auth?.currentUser?.uid ?: "tester_777"
+        val id = db?.collection("emergencies")?.document()?.id ?: return
+        val request = EmergencyRequest(id, uid, group, units, myLiveLocation?.first ?: 0.0, myLiveLocation?.second ?: 0.0, "ACTIVE", System.currentTimeMillis())
+        db?.collection("emergencies")?.document(id)?.set(request)
+    }
 }
 
 // ==========================================
@@ -152,12 +308,25 @@ fun AppRoot(state: AppState) {
     var showSplash by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
+        state.loadInitialData()
         delay(2000)
         showSplash = false
     }
 
     if (showSplash) {
         SplashScreen()
+    } else if (!state.isAuthenticated) {
+        // Simplified Login Screen
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("🩸", fontSize = 80.sp)
+            Text("Rakta-Vahini", fontSize = 32.sp, fontWeight = FontWeight.Black, color = Color(0xFFD32F2F))
+            Spacer(modifier = Modifier.height(20.dp))
+            RaktButton("Enter App") { state.isAuthenticated = true; state.loadInitialData() }
+        }
     } else if (!state.hasOnboarded) {
         OnboardingScreen { state.hasOnboarded = true }
     } else {
@@ -246,6 +415,9 @@ fun MainScreen(state: AppState) {
             SlideOverlay(visible = state.showSettings, onBack = { state.showSettings = false }) {
                 SettingsScreen(state, haptic)
             }
+            SlideOverlay(visible = state.showProfileEdit, onBack = { state.showProfileEdit = false }) {
+                ProfileEditScreen(state, haptic) { state.showProfileEdit = false; showToast("✅ Profile Updated!") }
+            }
             SlideOverlay(visible = state.showStaticPage != null, onBack = { state.showStaticPage = null }) {
                 state.showStaticPage?.let { StaticPageScreen(it, haptic, showToast) { state.showStaticPage = null } }
             }
@@ -256,7 +428,7 @@ fun MainScreen(state: AppState) {
 
         if (state.showEmergencySheet) {
             ModalBottomSheet(onDismissRequest = { state.showEmergencySheet = false }) {
-                EmergencySOSSheet(haptic, showToast) { state.showEmergencySheet = false }
+                EmergencySOSSheet(state, haptic, showToast) { state.showEmergencySheet = false }
             }
         }
     }
@@ -317,7 +489,7 @@ fun SearchTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit) 
                         value = selectedGroup, onValueChange = {}, readOnly = true,
                         label = { Text("Required Blood Group") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth(),
+                        modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
                     )
                     ExposedDropdownMenu(expanded = groupExpanded, onDismissRequest = { groupExpanded = false }) {
@@ -339,7 +511,7 @@ fun SearchTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit) 
         }
 
         if (isSearching) {
-            items(2) { SkeletonCard() }
+            items(count = 2) { _ -> SkeletonCard() }
         } else {
             val matches = state.enrolledUsers.filter { u ->
                 val daysSince = (System.currentTimeMillis() - u.lastDonationMs) / DAY_IN_MS
@@ -403,7 +575,7 @@ fun ProfileTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit)
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedTextField(value = uAge, onValueChange = { uAge = it }, label = { Text("Age") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp))
                         ExposedDropdownMenuBox(expanded = genderExpanded, onExpandedChange = { genderExpanded = !genderExpanded }, modifier = Modifier.weight(1f)) {
-                            OutlinedTextField(value = uGender, onValueChange = {}, readOnly = true, label = { Text("Gender") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = genderExpanded) }, modifier = Modifier.menuAnchor(), shape = RoundedCornerShape(10.dp))
+                            OutlinedTextField(value = uGender, onValueChange = {}, readOnly = true, label = { Text("Gender") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = genderExpanded) }, modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable), shape = RoundedCornerShape(10.dp))
                             ExposedDropdownMenu(expanded = genderExpanded, onDismissRequest = { genderExpanded = false }) {
                                 listOf("Male", "Female", "Other").forEach { g -> DropdownMenuItem(text = { Text(g) }, onClick = { uGender = g; genderExpanded = false }) }
                             }
@@ -412,7 +584,7 @@ fun ProfileTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit)
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         ExposedDropdownMenuBox(expanded = bgExpanded, onExpandedChange = { bgExpanded = !bgExpanded }, modifier = Modifier.weight(1f)) {
-                            OutlinedTextField(value = uBg, onValueChange = {}, readOnly = true, label = { Text("Blood Group") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = bgExpanded) }, modifier = Modifier.menuAnchor(), shape = RoundedCornerShape(10.dp))
+                            OutlinedTextField(value = uBg, onValueChange = {}, readOnly = true, label = { Text("Blood Group") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = bgExpanded) }, modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable), shape = RoundedCornerShape(10.dp))
                             ExposedDropdownMenu(expanded = bgExpanded, onDismissRequest = { bgExpanded = false }) {
                                 bloodGroups.forEach { bg -> DropdownMenuItem(text = { Text(bg) }, onClick = { uBg = bg; bgExpanded = false }) }
                             }
@@ -424,22 +596,28 @@ fun ProfileTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(value = uAddr, onValueChange = { uAddr = it }, label = { Text("Address") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp))
                     Spacer(modifier = Modifier.height(16.dp))
-                    SolidButton("Save User Profile") {
-                        haptic()
-                        state.enrolledUsers.add(0, Donor(System.currentTimeMillis().toInt(), uName.ifEmpty{"New User"}, uAge, uGender, uBg, uPhone, uAlt, uAddr, 5.0, 28.6, 77.2, System.currentTimeMillis() - (100 * DAY_IN_MS), 10, 0, 0))
-                        showToast("✅ Registered!")
-                    }
+                RaktButton("Save User Profile") {
+                haptic()
+                state.registerDonor(Donor(System.currentTimeMillis().toString(), uName.ifEmpty{"New User"}, "email@example.com", uAge, uGender, uBg, uPhone, uAlt, uAddr, 28.6, 77.2, System.currentTimeMillis() - (100 * DAY_IN_MS), 10, 0, 0))
+                showToast("✅ Registered!")
+                }
+                }
                 }
 
+                item {
                 CustomCard {
-                    Text("Log Donation", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text("Update timer to pause requests.", fontSize = 12.sp, color = Color.Gray)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(onClick = { haptic(); state.myHistory.add(0, System.currentTimeMillis()); state.showCertificate = true; showToast("❤️ Logged!") }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF444444)), shape = RoundedCornerShape(12.dp)) { Text("I Donated Today", fontWeight = FontWeight.Bold) }
+                Text("Log Donation", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("Update timer to pause requests.", fontSize = 12.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(onClick = { 
+                    haptic()
+                    state.logDonation()
+                    state.showCertificate = true 
+                    showToast("❤️ Logged!") 
+                }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF444444)), shape = RoundedCornerShape(12.dp)) { Text("I Donated Today", fontWeight = FontWeight.Bold) }
                 }
-            }
-        } else {
-            item {
+                }
+                } else {            item {
                 CustomCard {
                     Text("Hospital/Bank Details", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                     Spacer(modifier = Modifier.height(12.dp))
@@ -456,9 +634,9 @@ fun ProfileTab(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit)
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedTextField(value = hEmail, onValueChange = { hEmail = it }, label = { Text("Official Email ID") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp))
                     Spacer(modifier = Modifier.height(16.dp))
-                    SolidButton("Register Hospital") {
+                    RaktButton("Register Hospital") {
                         haptic()
-                        state.enrolledHospitals.add(0, Hospital(System.currentTimeMillis().toInt(), hName.ifEmpty{"New Hospital"}, hAddr, 12.0, 77.0, hEmail, hPhone, hLand))
+                        state.registerHospital(Hospital(System.currentTimeMillis().toString(), hName.ifEmpty{"New Hospital"}, hAddr, 12.0, 77.0, hEmail, hPhone, hLand))
                         showToast("✅ Registered!")
                     }
                 }
@@ -517,40 +695,15 @@ fun HistoryTab(state: AppState, haptic: () -> Unit) {
         }
 
         if (viewType == "user") {
-            itemsIndexed(state.myHistory) { _, d ->
+            itemsIndexed(state.globalLogs) { _, log ->
                 CustomCard {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        BloodBadge("🩸")
+                        BloodBadge(log.bloodGroup)
                         Spacer(modifier = Modifier.width(16.dp))
                         Column {
-                            Text("You (Personal)", fontWeight = FontWeight.Bold)
-                            Text(formatFullDate(d), fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-            itemsIndexed(state.enrolledUsers) { _, u ->
-                CustomCard {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BloodBadge(u.group)
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column {
-                            Text(u.name, fontWeight = FontWeight.Bold)
-                            Text("Donated: ${formatFullDate(u.lastDonationMs)}", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        } else {
-            itemsIndexed(state.enrolledUsers) { i, u ->
-                val hosp = state.enrolledHospitals[i % state.enrolledHospitals.size].name
-                CustomCard {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BloodBadge(u.group)
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column {
-                            Text(u.name, fontWeight = FontWeight.Bold)
-                            Text("🏥 To: $hosp", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(log.userName, fontWeight = FontWeight.Bold)
+                            Text("🏥 At: ${log.hospitalName}", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(formatFullDate(log.timestamp), fontSize = 11.sp, color = Color.Gray)
                         }
                     }
                 }
@@ -595,7 +748,7 @@ fun UserDetailScreen(u: Donor, haptic: () -> Unit) {
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        SolidButton("📞 Secure Call") {
+        RaktButton("📞 Secure Call") {
             haptic()
             context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${u.phone}".toUri()))
         }
@@ -616,10 +769,10 @@ fun HospitalDetailScreen(h: Hospital, haptic: () -> Unit) {
     }
     Spacer(modifier = Modifier.height(20.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        SolidButton("📞 Mobile", modifier = Modifier.weight(1f)) {
+        RaktButton("📞 Mobile", modifier = Modifier.weight(1f)) {
             haptic(); context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${h.phone}".toUri()))
         }
-        OutlinedButton("☎️ Landline", modifier = Modifier.weight(1f)) {
+        RaktOutlinedButton("☎️ Landline", modifier = Modifier.weight(1f)) {
             haptic(); context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${h.landline}".toUri()))
         }
     }
@@ -627,17 +780,116 @@ fun HospitalDetailScreen(h: Hospital, haptic: () -> Unit) {
 
 @Composable
 fun SettingsScreen(state: AppState, haptic: () -> Unit) {
+    CustomCard(onClick = { haptic(); state.showProfileEdit = true }) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Person, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text("User Profile", fontWeight = FontWeight.Bold)
+                    Text("Edit your information", fontSize = 12.sp, color = Color.Gray)
+                }
+            }
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = Color.Gray)
+        }
+    }
+
     CustomCard {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("🌙 Dark Mode", fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (state.isDarkTheme) Icons.Default.Info else Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary) // Placeholder icon
+                Spacer(modifier = Modifier.width(12.dp))
+                Text("🌙 Dark Mode", fontWeight = FontWeight.Bold)
+            }
             Switch(checked = state.isDarkTheme, onCheckedChange = { haptic(); state.isDarkTheme = it })
         }
     }
-    val pages = listOf("ℹ️ About Us" to "about", "❓ FAQ" to "faq", "🔒 Terms & Privacy" to "privacy", "🎧 Contact Support" to "support")
-    pages.forEach { (title, id) ->
-        CustomCard(onClick = { haptic(); state.showStaticPage = id }) { Text(title, fontWeight = FontWeight.Bold) }
+    
+    val pages = listOf(
+        Triple("ℹ️ About Us", "about", Icons.Default.Info),
+        Triple("🔒 Terms & Privacy", "privacy", Icons.Default.Lock),
+        Triple("🎧 Contact Support", "support", Icons.Default.Call)
+    )
+    
+    pages.forEach { (title, id, icon) ->
+        CustomCard(onClick = { haptic(); state.showStaticPage = id }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(title, fontWeight = FontWeight.Bold)
+            }
+        }
     }
-    CustomCard(onClick = { haptic(); state.showStaticPage = "report" }) { Text("⚠️ Report Issue", fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F)) }
+    
+    CustomCard(onClick = { haptic(); state.showStaticPage = "report" }) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFD32F2F))
+            Spacer(modifier = Modifier.width(12.dp))
+            Text("⚠️ Report Issue", fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F))
+        }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+    RaktOutlinedButton("Logout", onClick = { haptic(); state.signOut() })
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProfileEditScreen(state: AppState, haptic: () -> Unit, onSave: () -> Unit) {
+    var name by remember { mutableStateOf(state.currentUser.name) }
+    var age by remember { mutableStateOf(state.currentUser.age) }
+    var gender by remember { mutableStateOf(state.currentUser.gender) }
+    var bg by remember { mutableStateOf(state.currentUser.group) }
+    var phone by remember { mutableStateOf(state.currentUser.phone) }
+    var addr by remember { mutableStateOf(state.currentUser.address) }
+    
+    var genderExpanded by remember { mutableStateOf(false) }
+    var bgExpanded by remember { mutableStateOf(false) }
+
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Text("Edit Profile Information", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            CustomCard {
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Full Name") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedTextField(value = age, onValueChange = { age = it }, label = { Text("Age") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp))
+                    
+                    ExposedDropdownMenuBox(expanded = genderExpanded, onExpandedChange = { genderExpanded = !genderExpanded }, modifier = Modifier.weight(1f)) {
+                        OutlinedTextField(value = gender, onValueChange = {}, readOnly = true, label = { Text("Gender") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = genderExpanded) }, modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable), shape = RoundedCornerShape(10.dp))
+                        ExposedDropdownMenu(expanded = genderExpanded, onDismissRequest = { genderExpanded = false }) {
+                            listOf("Male", "Female", "Other").forEach { g -> DropdownMenuItem(text = { Text(g) }, onClick = { gender = g; genderExpanded = false }) }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ExposedDropdownMenuBox(expanded = bgExpanded, onExpandedChange = { bgExpanded = !bgExpanded }, modifier = Modifier.weight(1f)) {
+                        OutlinedTextField(value = bg, onValueChange = {}, readOnly = true, label = { Text("Blood Group") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = bgExpanded) }, modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable), shape = RoundedCornerShape(10.dp))
+                        ExposedDropdownMenu(expanded = bgExpanded, onDismissRequest = { bgExpanded = false }) {
+                            bloodGroups.forEach { group -> DropdownMenuItem(text = { Text(group) }, onClick = { bg = group; bgExpanded = false }) }
+                        }
+                    }
+                    OutlinedTextField(value = phone, onValueChange = { phone = it }, label = { Text("Phone") }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(10.dp))
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                OutlinedTextField(value = addr, onValueChange = { addr = it }, label = { Text("Address") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp))
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                RaktButton("Update Information") {
+                    haptic()
+                    state.currentUser = state.currentUser.copy(name = name, age = age, gender = gender, group = bg, phone = phone, address = addr)
+                    onSave()
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -652,7 +904,7 @@ fun StaticPageScreen(page: String, haptic: () -> Unit, showToast: (String) -> Un
                 Spacer(modifier = Modifier.height(16.dp))
                 OutlinedTextField(value = "", onValueChange = {}, placeholder = { Text("Describe your issue...") }, modifier = Modifier.fillMaxWidth().height(150.dp))
                 Spacer(modifier = Modifier.height(16.dp))
-                SolidButton("Submit") { haptic(); onClose(); showToast("Ticket Submitted.") }
+                RaktButton("Submit") { haptic(); onClose(); showToast("Ticket Submitted.") }
             }
         }
     }
@@ -675,7 +927,7 @@ fun CertificateScreen(haptic: () -> Unit, showToast: (String) -> Unit) {
             }
         }
         Spacer(modifier = Modifier.height(20.dp))
-        SolidButton("📥 Save PDF Certificate") { haptic(); showToast("Certificate saved to Downloads!") }
+        RaktButton("📥 Save PDF Certificate") { haptic(); showToast("Certificate saved to Downloads!") }
         Text("Eligibility timer reset to 90 days.", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(top=10.dp))
     }
 }
@@ -702,7 +954,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         Text("🤝", fontSize = 80.sp, modifier = Modifier.padding(vertical = 40.dp))
         Text("Welcome to the next-gen blood donation network. Experience smart matching, live tracking, and digital certificates.", textAlign = TextAlign.Center, color = Color.Gray)
         Spacer(modifier = Modifier.height(40.dp))
-        SolidButton("Get Started") { onFinish() }
+        RaktButton("Get Started") { onFinish() }
     }
 }
 
@@ -739,14 +991,14 @@ fun BloodBadge(group: String, size: androidx.compose.ui.unit.Dp = 50.dp, textSiz
 }
 
 @Composable
-fun SolidButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun RaktButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Button(onClick = onClick, modifier = modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F)), shape = RoundedCornerShape(12.dp)) {
         Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 4.dp))
     }
 }
 
 @Composable
-fun OutlinedButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun RaktOutlinedButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     OutlinedButton(onClick = onClick, modifier = modifier.fillMaxWidth(), border = BorderStroke(2.dp, Color(0xFFD32F2F)), shape = RoundedCornerShape(12.dp)) {
         Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFFD32F2F), modifier = Modifier.padding(vertical = 4.dp))
     }
@@ -807,7 +1059,7 @@ fun SkeletonCard() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EmergencySOSSheet(haptic: () -> Unit, showToast: (String) -> Unit, onDismiss: () -> Unit) {
+fun EmergencySOSSheet(state: AppState, haptic: () -> Unit, showToast: (String) -> Unit, onDismiss: () -> Unit) {
     var sosGroup by remember { mutableStateOf("O+") }
     var groupExpanded by remember { mutableStateOf(false) }
     var sosUnits by remember { mutableStateOf("1") }
@@ -818,7 +1070,7 @@ fun EmergencySOSSheet(haptic: () -> Unit, showToast: (String) -> Unit, onDismiss
 
         Spacer(modifier = Modifier.height(16.dp))
         ExposedDropdownMenuBox(expanded = groupExpanded, onExpandedChange = { groupExpanded = !groupExpanded }) {
-            OutlinedTextField(value = sosGroup, onValueChange = {}, readOnly = true, label = { Text("Needed Blood Group") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }, modifier = Modifier.menuAnchor().fillMaxWidth(), shape = RoundedCornerShape(10.dp))
+            OutlinedTextField(value = sosGroup, onValueChange = {}, readOnly = true, label = { Text("Needed Blood Group") }, trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = groupExpanded) }, modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth(), shape = RoundedCornerShape(10.dp))
             ExposedDropdownMenu(expanded = groupExpanded, onDismissRequest = { groupExpanded = false }) {
                 bloodGroups.forEach { bg -> DropdownMenuItem(text = { Text(bg) }, onClick = { sosGroup = bg; groupExpanded = false }) }
             }
@@ -828,7 +1080,12 @@ fun EmergencySOSSheet(haptic: () -> Unit, showToast: (String) -> Unit, onDismiss
         Spacer(modifier = Modifier.height(24.dp))
 
         Button(
-            onClick = { haptic(); onDismiss(); showToast("🚨 SOS Broadcasted! Pushing to nearby $sosGroup donors...") },
+            onClick = { 
+                haptic()
+                state.broadcastEmergency(sosGroup, sosUnits)
+                onDismiss()
+                showToast("🚨 SOS Broadcasted! Pushing to nearby $sosGroup donors...") 
+            },
             modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
             contentPadding = PaddingValues()
@@ -852,7 +1109,7 @@ fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): D
 
 // ==========================================
 // 7. PREVIEW SECTION
-// ==========================================g
+// ==========================================
 
 @Preview(showBackground = true)
 @Composable
@@ -864,37 +1121,57 @@ fun PreviewOnboardingScreen() { RaktaVahiniTheme(false) { OnboardingScreen {} } 
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewSearchTab() { RaktaVahiniTheme(false) { SearchTab(AppState(), {}, {}) } }
+fun PreviewSearchTab() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); SearchTab(s, {}) { _ -> } } }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewProfileTab() { RaktaVahiniTheme(false) { ProfileTab(AppState(), {}, {}) } }
+fun PreviewProfileTab() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); ProfileTab(s, {}) { _ -> } } }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewHospitalsTab() { RaktaVahiniTheme(false) { HospitalsTab(AppState()) {} } }
+fun PreviewHospitalsTab() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); HospitalsTab(s) {} } }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewUsersTab() { RaktaVahiniTheme(false) { UsersTab(AppState()) {} } }
+fun PreviewUsersTab() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); UsersTab(s) {} } }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewHistoryTab() { RaktaVahiniTheme(false) { HistoryTab(AppState()) {} } }
+fun PreviewHistoryTab() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); HistoryTab(s) {} } }
 
 @Preview(showBackground = true)
 @Composable
 fun PreviewUserDetail() {
     RaktaVahiniTheme(false) {
-        val dummyDonor = Donor(1, "Rahul Sharma", "28", "Male", "O+", "9876543210", "9876543201", "Sector 4", 5.0, 28.6, 77.2, System.currentTimeMillis() - (100 * DAY_IN_MS), 5, 8, 1)
+        val dummyDonor = Donor("1", "Rahul Sharma", "rahul@example.com", "28", "Male", "O+", "9876543210", "9876543201", "Sector 4", 28.6, 77.2, System.currentTimeMillis() - (100 * DAY_IN_MS), 5, 8, 1)
         UserDetailScreen(dummyDonor) {}
     }
 }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewEmergencySheet() { RaktaVahiniTheme(false) { EmergencySOSSheet({}, {}, {}) } }
+fun PreviewEmergencySheet() { RaktaVahiniTheme(false) { EmergencySOSSheet(AppState(true), {}, {}) {} } }
 
 @Preview(showBackground = true)
 @Composable
-fun PreviewCertificate() { RaktaVahiniTheme(false) { CertificateScreen({}, {}) } }
+fun PreviewCertificate() { RaktaVahiniTheme(false) { CertificateScreen({}) {} } }
+
+@Preview(showBackground = true, name = "Settings Screen")
+@Composable
+fun PreviewSettingsScreen() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); SettingsScreen(s) {} } }
+
+@Preview(showBackground = true, name = "Profile Edit Screen")
+@Composable
+fun PreviewProfileEditScreen() { RaktaVahiniTheme(false) { val s = AppState(true); s.loadInitialData(); ProfileEditScreen(s, {}) {} } }
+
+@Preview(showBackground = true, name = "About Us Page")
+@Composable
+fun PreviewAboutUsPage() { RaktaVahiniTheme(false) { StaticPageScreen("about", {}, {}) {} } }
+
+@Preview(showBackground = true, name = "Terms & Privacy Page")
+@Composable
+fun PreviewPrivacyPage() { RaktaVahiniTheme(false) { StaticPageScreen("privacy", {}, {}) {} } }
+
+@Preview(showBackground = true, name = "Support/Report Page")
+@Composable
+fun PreviewSupportPage() { RaktaVahiniTheme(false) { StaticPageScreen("support", {}, {}) {} } }
