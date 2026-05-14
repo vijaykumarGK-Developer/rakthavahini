@@ -1,4 +1,4 @@
-# 🩸 Rakta-Vahini (रक्त-वाहिनी)
+# 🩸 Rakta-Vahini 
 
 **Rakta-Vahini** is an intelligent, real-time blood donation network designed to eliminate the friction in blood emergencies. By leveraging modern Android technologies and real-time cloud synchronization, it connects eligible donors with hospitals and individuals in urgent need within seconds.
 
